@@ -1,0 +1,39 @@
+{
+  "_dagrejs-Bv2bwL2a.js": {
+    "file": "assets/dagrejs-Bv2bwL2a.js",
+    "name": "dagrejs"
+  },
+  "_headlessui-Qd60b_dd.js": {
+    "file": "assets/headlessui-Qd60b_dd.js",
+    "name": "headlessui",
+    "imports": [
+      "_dagrejs-Bv2bwL2a.js"
+    ]
+  },
+  "_react-dom-l0sNRNKZ.js": {
+    "file": "assets/react-dom-l0sNRNKZ.js",
+    "name": "react-dom"
+  },
+  "_reactflow-Mel101Sb.js": {
+    "file": "assets/reactflow-Mel101Sb.js",
+    "name": "reactflow",
+    "imports": [
+      "_headlessui-Qd60b_dd.js",
+      "_dagrejs-Bv2bwL2a.js"
+    ]
+  },
+  "src/main.tsx": {
+    "file": "assets/main-BCEd1-zj.js",
+    "name": "main",
+    "src": "src/main.tsx",
+    "isEntry": true,
+    "imports": [
+      "_reactflow-Mel101Sb.js",
+      "_headlessui-Qd60b_dd.js",
+      "_dagrejs-Bv2bwL2a.js"
+    ],
+    "css": [
+      "assets/main-B0N8OYdb.css"
+    ]
+  }
+}
