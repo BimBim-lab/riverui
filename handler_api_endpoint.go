@@ -882,14 +882,15 @@ func (a *stateAndCountGetEndpoint[TTx]) Execute(ctx context.Context, _ *stateAnd
 	// with the API request. Only fall back to a live query when no cached
 	// result exists yet (cold start); once the cache is warm, always serve
 	// the cached counts rather than re-running the count query on every poll.
+	// The cold-start query runs through the cacher itself (RunQuery) rather
+	// than a separate inline query, so it also warms the cache - otherwise
+	// every request would re-run the live query until the first background
+	// tick, up to ~120s after a fresh start.
 	stateAndCountRes, ok := a.queryCacher.CachedRes()
 	if !ok {
 		var err error
-		stateAndCountRes, err = dbutil.WithTxV(ctx, a.DB, func(ctx context.Context, execTx riverdriver.ExecutorTx) (map[rivertype.JobState]int, error) {
-			tx := a.Driver.UnwrapTx(execTx)
 
-			return a.Driver.UnwrapExecutor(tx).JobCountByAllStates(ctx, &riverdriver.JobCountByAllStatesParams{Schema: a.Client.Schema()})
-		})
+		stateAndCountRes, err = a.queryCacher.RunQuery(ctx)
 		if err != nil {
 			return nil, fmt.Errorf("error getting states and counts: %w", err)
 		}

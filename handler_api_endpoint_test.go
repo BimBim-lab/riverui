@@ -905,31 +905,36 @@ func TestStateAndCountGetEndpoint(t *testing.T) {
 		}, resp)
 	})
 
-	t.Run("UsesStaleCacheOnceWarmInsteadOfRequeryingLive", func(t *testing.T) {
+	t.Run("ColdStartExecuteWarmsCacheAndSubsequentCallsUseStaleResult", func(t *testing.T) {
 		t.Parallel()
 
 		endpoint, bundle := setupEndpoint(ctx, t, newStateAndCountGetEndpoint)
 
-		const warmedJobCount = 3
-		for range warmedJobCount {
-			_ = testfactory.Job(ctx, t, bundle.exec, &testfactory.JobOpts{State: ptrutil.Ptr(rivertype.JobStateAvailable)})
-		}
+		// Cache starts empty; no RunQuery is called manually before Execute.
+		_, ok := endpoint.queryCacher.CachedRes()
+		require.False(t, ok)
 
-		// Warm the cache with the current job count.
-		_, err := endpoint.queryCacher.RunQuery(ctx)
-		require.NoError(t, err)
-
-		// Insert more jobs directly, bypassing the cache. If Execute served
-		// a fresh live query instead of the cache, the response would show
-		// warmedJobCount+1; it must instead show the stale warmedJobCount,
-		// proving JobCountByAllStates was not run again after the cache
-		// warmed.
 		_ = testfactory.Job(ctx, t, bundle.exec, &testfactory.JobOpts{State: ptrutil.Ptr(rivertype.JobStateAvailable)})
 
+		// First request: cold-start fallback must run the live query safely
+		// and, in doing so, also warm the cache (via queryCacher.RunQuery
+		// rather than a separate inline query).
 		resp, err := apitest.InvokeHandler(ctx, endpoint.Execute, testMountOpts(t), &stateAndCountGetRequest{})
 		require.NoError(t, err)
-		require.Equal(t, &stateAndCountGetResponse{
-			Available: warmedJobCount,
-		}, resp)
+		require.Equal(t, &stateAndCountGetResponse{Available: 1}, resp)
+
+		cachedRes, ok := endpoint.queryCacher.CachedRes()
+		require.True(t, ok)
+		require.Equal(t, 1, cachedRes[rivertype.JobStateAvailable])
+
+		// Insert a second job directly, bypassing the cache. If the second
+		// request re-ran JobCountByAllStates instead of using the now-warm
+		// cache, the response would show 2; it must instead still show the
+		// stale count of 1.
+		_ = testfactory.Job(ctx, t, bundle.exec, &testfactory.JobOpts{State: ptrutil.Ptr(rivertype.JobStateAvailable)})
+
+		resp, err = apitest.InvokeHandler(ctx, endpoint.Execute, testMountOpts(t), &stateAndCountGetRequest{})
+		require.NoError(t, err)
+		require.Equal(t, &stateAndCountGetResponse{Available: 1}, resp)
 	})
 }
