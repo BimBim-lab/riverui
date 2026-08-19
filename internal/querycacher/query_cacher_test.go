@@ -60,15 +60,15 @@ func TestQueryCacher(t *testing.T) {
 		require.False(t, ok)
 	})
 
-	t.Run("DefaultTickPeriodTargetsOneHundredTwentySeconds", func(t *testing.T) {
+	t.Run("DefaultTickPeriodTargetsSixtySeconds", func(t *testing.T) {
 		t.Parallel()
 
 		queryCacher, _ := setup(ctx, t)
 
-		// 120s base +/- the existing 1s jitter mechanism (unchanged). This
+		// 60s base +/- the existing 1s jitter mechanism (unchanged). This
 		// asserts the target interval without ever waiting for a full tick.
-		require.GreaterOrEqual(t, queryCacher.tickPeriod, 119*time.Second)
-		require.LessOrEqual(t, queryCacher.tickPeriod, 121*time.Second)
+		require.GreaterOrEqual(t, queryCacher.tickPeriod, 59*time.Second)
+		require.LessOrEqual(t, queryCacher.tickPeriod, 61*time.Second)
 	})
 
 	t.Run("WithCachedResult", func(t *testing.T) {

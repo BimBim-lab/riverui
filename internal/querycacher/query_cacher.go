@@ -36,7 +36,7 @@ func NewQueryCacher[TRes any](archetype *baseservice.Archetype, runQuery func(ct
 
 	queryCacher := baseservice.Init(archetype, &QueryCacher[TRes]{
 		runQuery:   runQuery,
-		tickPeriod: 120*time.Second + randomTickVariance,
+		tickPeriod: 60*time.Second + randomTickVariance,
 	})
 
 	// TODO(brandur): Push this up into baseservice.

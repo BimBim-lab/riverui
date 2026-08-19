@@ -885,7 +885,7 @@ func (a *stateAndCountGetEndpoint[TTx]) Execute(ctx context.Context, _ *stateAnd
 	// The cold-start query runs through the cacher itself (RunQuery) rather
 	// than a separate inline query, so it also warms the cache - otherwise
 	// every request would re-run the live query until the first background
-	// tick, up to ~120s after a fresh start.
+	// tick, up to ~60s after a fresh start.
 	stateAndCountRes, ok := a.queryCacher.CachedRes()
 	if !ok {
 		var err error
