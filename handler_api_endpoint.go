@@ -835,8 +835,7 @@ type stateAndCountGetEndpoint[TTx any] struct {
 	apibundle.APIBundle[TTx]
 	apiendpoint.Endpoint[jobCancelRequest, stateAndCountGetResponse]
 
-	queryCacheSkipThreshold int // constant normally, but settable for testing
-	queryCacher             *querycacher.QueryCacher[map[rivertype.JobState]int]
+	queryCacher *querycacher.QueryCacher[map[rivertype.JobState]int]
 }
 
 func newStateAndCountGetEndpoint[TTx any](bundle apibundle.APIBundle[TTx]) *stateAndCountGetEndpoint[TTx] {
@@ -848,9 +847,8 @@ func newStateAndCountGetEndpoint[TTx any](bundle apibundle.APIBundle[TTx]) *stat
 		})
 	}
 	return &stateAndCountGetEndpoint[TTx]{
-		APIBundle:               bundle,
-		queryCacheSkipThreshold: 1_000_000,
-		queryCacher:             querycacher.NewQueryCacher(bundle.Archetype, runQuery),
+		APIBundle:   bundle,
+		queryCacher: querycacher.NewQueryCacher(bundle.Archetype, runQuery),
 	}
 }
 
@@ -879,23 +877,13 @@ type stateAndCountGetResponse struct {
 }
 
 func (a *stateAndCountGetEndpoint[TTx]) Execute(ctx context.Context, _ *stateAndCountGetRequest) (*stateAndCountGetResponse, error) {
-	// Counts the total number of jobs in a state and count result.
-	totalJobs := func(stateAndCountRes map[rivertype.JobState]int) int {
-		var totalJobs int
-		for _, count := range stateAndCountRes {
-			totalJobs += count
-		}
-		return totalJobs
-	}
-
-	// Counting jobs can be an expensive operation given a large table, so in
-	// the presence of such, prefer to use a result that's cached periodically
-	// instead of querying inline with the API request. In case we don't have a
-	// cached result yet or there's a relatively small number of job rows, run
-	// the query directly (in the case of the latter so we present the freshest
-	// possible information).
+	// Counting jobs can be an expensive operation given a large table, so
+	// prefer a result that's cached periodically instead of querying inline
+	// with the API request. Only fall back to a live query when no cached
+	// result exists yet (cold start); once the cache is warm, always serve
+	// the cached counts rather than re-running the count query on every poll.
 	stateAndCountRes, ok := a.queryCacher.CachedRes()
-	if !ok || totalJobs(stateAndCountRes) < a.queryCacheSkipThreshold {
+	if !ok {
 		var err error
 		stateAndCountRes, err = dbutil.WithTxV(ctx, a.DB, func(ctx context.Context, execTx riverdriver.ExecutorTx) (map[rivertype.JobState]int, error) {
 			tx := a.Driver.UnwrapTx(execTx)

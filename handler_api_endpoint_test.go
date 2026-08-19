@@ -905,43 +905,31 @@ func TestStateAndCountGetEndpoint(t *testing.T) {
 		}, resp)
 	})
 
-	t.Run("WithCachedQueryAboveSkipThreshold", func(t *testing.T) {
+	t.Run("UsesStaleCacheOnceWarmInsteadOfRequeryingLive", func(t *testing.T) {
 		t.Parallel()
 
 		endpoint, bundle := setupEndpoint(ctx, t, newStateAndCountGetEndpoint)
 
-		const queryCacheSkipThreshold = 3
-		for range queryCacheSkipThreshold + 1 {
+		const warmedJobCount = 3
+		for range warmedJobCount {
 			_ = testfactory.Job(ctx, t, bundle.exec, &testfactory.JobOpts{State: ptrutil.Ptr(rivertype.JobStateAvailable)})
 		}
 
+		// Warm the cache with the current job count.
 		_, err := endpoint.queryCacher.RunQuery(ctx)
 		require.NoError(t, err)
+
+		// Insert more jobs directly, bypassing the cache. If Execute served
+		// a fresh live query instead of the cache, the response would show
+		// warmedJobCount+1; it must instead show the stale warmedJobCount,
+		// proving JobCountByAllStates was not run again after the cache
+		// warmed.
+		_ = testfactory.Job(ctx, t, bundle.exec, &testfactory.JobOpts{State: ptrutil.Ptr(rivertype.JobStateAvailable)})
 
 		resp, err := apitest.InvokeHandler(ctx, endpoint.Execute, testMountOpts(t), &stateAndCountGetRequest{})
 		require.NoError(t, err)
 		require.Equal(t, &stateAndCountGetResponse{
-			Available: queryCacheSkipThreshold + 1,
-		}, resp)
-	})
-
-	t.Run("WithCachedQueryBelowSkipThreshold", func(t *testing.T) {
-		t.Parallel()
-
-		endpoint, bundle := setupEndpoint(ctx, t, newStateAndCountGetEndpoint)
-
-		const queryCacheSkipThreshold = 3
-		for range queryCacheSkipThreshold - 1 {
-			_ = testfactory.Job(ctx, t, bundle.exec, &testfactory.JobOpts{State: ptrutil.Ptr(rivertype.JobStateAvailable)})
-		}
-
-		_, err := endpoint.queryCacher.RunQuery(ctx)
-		require.NoError(t, err)
-
-		resp, err := apitest.InvokeHandler(ctx, endpoint.Execute, testMountOpts(t), &stateAndCountGetRequest{})
-		require.NoError(t, err)
-		require.Equal(t, &stateAndCountGetResponse{
-			Available: queryCacheSkipThreshold - 1,
+			Available: warmedJobCount,
 		}, resp)
 	})
 }
