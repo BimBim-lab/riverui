@@ -1,0 +1,52 @@
+{
+  "_dagrejs-nxVDlg17.js": {
+    "file": "assets/dagrejs-nxVDlg17.js",
+    "name": "dagrejs",
+    "imports": [
+      "_rolldown-runtime-hePW80VL.js"
+    ]
+  },
+  "_headlessui-BnJ8kb0i.js": {
+    "file": "assets/headlessui-BnJ8kb0i.js",
+    "name": "headlessui",
+    "imports": [
+      "_rolldown-runtime-hePW80VL.js"
+    ]
+  },
+  "_react-dom-Bzrq9Dsz.js": {
+    "file": "assets/react-dom-Bzrq9Dsz.js",
+    "name": "react-dom",
+    "imports": [
+      "_rolldown-runtime-hePW80VL.js",
+      "_headlessui-BnJ8kb0i.js"
+    ]
+  },
+  "_reactflow-DNtvRKDD.js": {
+    "file": "assets/reactflow-DNtvRKDD.js",
+    "name": "reactflow",
+    "imports": [
+      "_rolldown-runtime-hePW80VL.js",
+      "_headlessui-BnJ8kb0i.js"
+    ]
+  },
+  "_rolldown-runtime-hePW80VL.js": {
+    "file": "assets/rolldown-runtime-hePW80VL.js",
+    "name": "rolldown-runtime"
+  },
+  "src/main.tsx": {
+    "file": "assets/main-CjHvrTAs.js",
+    "name": "main",
+    "src": "src/main.tsx",
+    "isEntry": true,
+    "imports": [
+      "_rolldown-runtime-hePW80VL.js",
+      "_headlessui-BnJ8kb0i.js",
+      "_react-dom-Bzrq9Dsz.js",
+      "_reactflow-DNtvRKDD.js",
+      "_dagrejs-nxVDlg17.js"
+    ],
+    "css": [
+      "assets/main-B4A2dm7k.css"
+    ]
+  }
+}
