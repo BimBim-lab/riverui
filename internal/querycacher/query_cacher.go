@@ -34,6 +34,10 @@ type QueryCacherOpts struct {
 	// preceding query. The period starts after the query finishes, so an
 	// expensive query can never cause this service to run continuously.
 	NextTickPeriod func(queryDuration time.Duration, queryErr error) time.Duration
+
+	// TickPeriod replaces the default 10 second base interval between queries
+	// when positive. The random variance is still applied on top of it.
+	TickPeriod time.Duration
 }
 
 func NewQueryCacher[TRes any](archetype *baseservice.Archetype, runQuery func(ctx context.Context) (TRes, error)) *QueryCacher[TRes] {
@@ -46,14 +50,18 @@ func NewQueryCacherWithOpts[TRes any](archetype *baseservice.Archetype, runQuery
 	// little differently to make a thundering herd problem less likely.
 	randomTickVariance := time.Duration(rand.Float64()*float64(2*time.Second)) - 1*time.Second
 	var nextTickPeriod func(queryDuration time.Duration, queryErr error) time.Duration
+	tickPeriod := 10 * time.Second
 	if opts != nil {
 		nextTickPeriod = opts.NextTickPeriod
+		if opts.TickPeriod > 0 {
+			tickPeriod = opts.TickPeriod
+		}
 	}
 
 	queryCacher := baseservice.Init(archetype, &QueryCacher[TRes]{
 		nextTickPeriod: nextTickPeriod,
 		runQuery:       runQuery,
-		tickPeriod:     10*time.Second + randomTickVariance,
+		tickPeriod:     tickPeriod + randomTickVariance,
 	})
 
 	// TODO(brandur): Push this up into baseservice.
@@ -75,6 +83,12 @@ func (s *QueryCacher[TRes]) CachedRes() (TRes, bool) {
 	}
 
 	return s.cachedRes, true
+}
+
+// TickPeriod returns the base interval between background queries, including
+// its random variance.
+func (s *QueryCacher[TRes]) TickPeriod() time.Duration {
+	return s.tickPeriod
 }
 
 // RunQuery runs the internal query function and caches the result. It's not

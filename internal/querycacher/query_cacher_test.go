@@ -150,6 +150,23 @@ func TestQueryCacher(t *testing.T) {
 	})
 }
 
+func TestQueryCacherTickPeriodOptNoDB(t *testing.T) {
+	t.Parallel()
+
+	var (
+		archetype = riversharedtest.BaseServiceArchetype(t)
+		runQuery  = func(_ context.Context) (int, error) { return 0, nil }
+	)
+
+	defaultCacher := NewQueryCacher(archetype, runQuery)
+	require.GreaterOrEqual(t, defaultCacher.TickPeriod(), 9*time.Second)
+	require.LessOrEqual(t, defaultCacher.TickPeriod(), 11*time.Second)
+
+	customCacher := NewQueryCacherWithOpts(archetype, runQuery, &QueryCacherOpts{TickPeriod: time.Minute})
+	require.GreaterOrEqual(t, customCacher.TickPeriod(), 59*time.Second)
+	require.LessOrEqual(t, customCacher.TickPeriod(), 61*time.Second)
+}
+
 func TestSimplifyArchetypeLogName(t *testing.T) {
 	t.Parallel()
 

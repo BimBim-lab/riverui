@@ -891,7 +891,13 @@ type stateAndCountGetEndpoint[TTx any] struct {
 
 const (
 	stateAndCountDefaultMax = 10_000
-	stateCountBoundedMaxAge = 30 * time.Second
+
+	// The bounded count is refreshed in the background once a minute and every
+	// request is served from that snapshot. A normal cycle is at most the
+	// period plus 1s of tick variance plus the 30s query timeout, so the max
+	// age only forces an inline query after a refresh was missed or failed.
+	stateCountBoundedRefreshPeriod = 60 * time.Second
+	stateCountBoundedMaxAge        = 2 * stateCountBoundedRefreshPeriod
 
 	// Two missed maximum-interval refreshes make an estimate preferable to an
 	// increasingly misleading exact snapshot.
@@ -907,7 +913,11 @@ func newStateAndCountGetEndpoint[TTx any](bundle apibundle.APIBundle[TTx]) *stat
 		countMax:  stateAndCountDefaultMax,
 		driver:    newRiverUIDriver(bundle.Driver.DatabaseName()),
 	}
-	endpoint.boundedQueryCacher = querycacher.NewQueryCacher(bundle.Archetype, endpoint.queryBoundedCounts)
+	endpoint.boundedQueryCacher = querycacher.NewQueryCacherWithOpts(
+		bundle.Archetype,
+		endpoint.queryBoundedCounts,
+		&querycacher.QueryCacherOpts{TickPeriod: stateCountBoundedRefreshPeriod},
+	)
 	endpoint.exactQueryCacher = querycacher.NewQueryCacherWithOpts(
 		bundle.Archetype,
 		endpoint.queryExactCounts,
@@ -968,26 +978,18 @@ type stateAndCountGetResponse struct {
 }
 
 // Execute resolves every state's count from the cheapest sufficiently useful
-// source. A bounded index scan gives fresh exact values for small states. Large
-// states prefer a recent exact snapshot refreshed adaptively in the background,
-// then a database planner/statistics estimate, and finally the bound proven by the index
-// scan. Full exact scans are never part of request latency.
+// source. A bounded index scan, cached and refreshed once a minute, gives exact
+// values for small states. Large states prefer a recent exact snapshot refreshed
+// adaptively in the background, then a database planner/statistics estimate, and
+// finally the bound proven by the index scan. Full exact scans are never part of
+// request latency.
 func (a *stateAndCountGetEndpoint[TTx]) Execute(ctx context.Context, _ *stateAndCountGetRequest) (*stateAndCountGetResponse, error) {
-	countsAreExact := func(snapshot stateCountSnapshot) bool {
-		for _, count := range snapshot.Counts {
-			if count > a.countMax {
-				return false
-			}
-		}
-		return true
-	}
-
-	// Prefer fresh counts while every state is below the cap. Once any state is
-	// capped, serve the periodically refreshed result to collapse queries from
-	// multiple UI clients. Both paths use the same bounded query.
+	// Serve the periodically refreshed bounded snapshot, whether or not any
+	// state is capped, to collapse queries from multiple UI clients into one
+	// background query per refresh period.
 	boundedSnapshot, ok := a.boundedQueryCacher.CachedRes()
 	boundedAccuracy := stateCountAccuracyExactCached
-	if !ok || countsAreExact(boundedSnapshot) || time.Since(boundedSnapshot.ObservedAt) > stateCountBoundedMaxAge {
+	if !ok || time.Since(boundedSnapshot.ObservedAt) > stateCountBoundedMaxAge {
 		var err error
 		// Populate the cache on cold start and stop serving old snapshots when
 		// background refreshes fail. This query is bounded even on large tables.

@@ -1303,14 +1303,16 @@ func TestStateAndCountGetEndpoint(t *testing.T) {
 		_, err := endpoint.boundedQueryCacher.RunQuery(ctx)
 		require.NoError(t, err)
 
-		// An exact cache result is refreshed inline for the latest counts.
+		// A cached result below the cap is reused until the next background
+		// refresh instead of being refreshed inline on every request.
 		_ = testfactory.Job(ctx, t, bundle.exec, &testfactory.JobOpts{State: new(rivertype.JobStateCancelled), FinalizedAt: new(time.Now())})
 
 		resp, err := apitest.InvokeHandler(ctx, endpoint.Execute, testMountOpts(t), &stateAndCountGetRequest{})
 		require.NoError(t, err)
-		requireExactCounts(t, resp)
 		require.Equal(t, countMax-1, resp.Available.Count)
-		require.Equal(t, 1, resp.Cancelled.Count)
+		require.Equal(t, stateCountAccuracyExactCached, resp.Available.Accuracy)
+		require.Zero(t, resp.Cancelled.Count)
+		require.Equal(t, stateCountAccuracyExactCached, resp.Cancelled.Accuracy)
 	})
 
 	t.Run("WithPlannerEstimate", func(t *testing.T) {
@@ -1420,6 +1422,219 @@ func TestStateCountExactRefreshPeriod(t *testing.T) {
 	require.Equal(t, 100*time.Second, stateCountExactRefreshPeriod(2*time.Second, nil))
 	require.Equal(t, stateCountExactRefreshMax, stateCountExactRefreshPeriod(time.Hour, nil))
 	require.Equal(t, stateCountExactRefreshMax, stateCountExactRefreshPeriod(time.Second, errors.New("database busy")))
+}
+
+// newStateCountEndpointNoDB builds a state count endpoint whose bounded and
+// exact queries are replaced by the given functions, so request behavior can be
+// tested without a database.
+func newStateCountEndpointNoDB(
+	t *testing.T,
+	boundedQuery func(ctx context.Context) (stateCountSnapshot, error),
+	exactQuery func(ctx context.Context) (stateCountSnapshot, error),
+) *stateAndCountGetEndpoint[pgx.Tx] {
+	t.Helper()
+
+	archetype := riversharedtest.BaseServiceArchetype(t)
+	endpoint := newStateAndCountGetEndpoint(apibundle.APIBundle[pgx.Tx]{
+		Archetype: archetype,
+		Driver:    riverpgxv5.New(nil),
+		Logger:    riversharedtest.Logger(t),
+	})
+	endpoint.boundedQueryCacher = querycacher.NewQueryCacherWithOpts(
+		archetype,
+		boundedQuery,
+		&querycacher.QueryCacherOpts{TickPeriod: stateCountBoundedRefreshPeriod},
+	)
+	endpoint.exactQueryCacher = querycacher.NewQueryCacher(archetype, exactQuery)
+	endpoint.estimateCounts = func(_ context.Context, states []rivertype.JobState) (map[rivertype.JobState]stateCountEstimate, error) {
+		require.FailNow(t, "unexpected estimate", "states: %v", states)
+		return nil, nil
+	}
+	return endpoint
+}
+
+func TestStateCountBoundedCadenceNoDB(t *testing.T) {
+	t.Parallel()
+
+	require.Equal(t, 60*time.Second, stateCountBoundedRefreshPeriod)
+
+	// A normal refresh cycle (period, tick variance, and RunQuery's 30s timeout)
+	// must finish before the snapshot counts as stale, or requests between
+	// refreshes would run the bounded query inline.
+	require.Greater(t, stateCountBoundedMaxAge, stateCountBoundedRefreshPeriod+time.Second+30*time.Second)
+
+	endpoint := newStateAndCountGetEndpoint(apibundle.APIBundle[pgx.Tx]{
+		Archetype: riversharedtest.BaseServiceArchetype(t),
+		Driver:    riverpgxv5.New(nil),
+		Logger:    riversharedtest.Logger(t),
+	})
+	require.GreaterOrEqual(t, endpoint.boundedQueryCacher.TickPeriod(), 59*time.Second)
+	require.LessOrEqual(t, endpoint.boundedQueryCacher.TickPeriod(), 61*time.Second)
+
+	// The exact cacher keeps the default first tick; its later ticks stay
+	// adaptive through stateCountExactRefreshPeriod.
+	require.GreaterOrEqual(t, endpoint.exactQueryCacher.TickPeriod(), 9*time.Second)
+	require.LessOrEqual(t, endpoint.exactQueryCacher.TickPeriod(), 11*time.Second)
+}
+
+func TestStateCountBoundedCacheReuseNoDB(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+
+	exactQuery := func(_ context.Context) (stateCountSnapshot, error) {
+		return stateCountSnapshot{}, errors.New("exact query must not run in a request")
+	}
+
+	t.Run("RepeatedRequestsBelowCapReuseSnapshot", func(t *testing.T) {
+		t.Parallel()
+
+		var boundedQueries int
+		endpoint := newStateCountEndpointNoDB(t, func(_ context.Context) (stateCountSnapshot, error) {
+			boundedQueries++
+			return stateCountSnapshot{
+				Counts:     map[rivertype.JobState]int{rivertype.JobStateRunning: 1},
+				ObservedAt: time.Now(),
+			}, nil
+		}, exactQuery)
+
+		// Cold start runs the bounded query inline once.
+		resp, err := endpoint.Execute(ctx, &stateAndCountGetRequest{})
+		require.NoError(t, err)
+		require.Equal(t, 1, boundedQueries)
+		require.Equal(t, stateCountAccuracyExact, resp.Running.Accuracy)
+		require.Equal(t, 1, resp.Running.Count)
+		observedAt := *resp.Running.ObservedAt
+
+		// Every state is below the cap, but later requests still reuse the
+		// snapshot instead of querying again.
+		for range 2 {
+			resp, err := endpoint.Execute(ctx, &stateAndCountGetRequest{})
+			require.NoError(t, err)
+			require.Equal(t, 1, boundedQueries)
+			require.Equal(t, stateCountAccuracyExactCached, resp.Running.Accuracy)
+			require.Equal(t, 1, resp.Running.Count)
+			require.Equal(t, observedAt, *resp.Running.ObservedAt)
+			require.Equal(t, stateCountAccuracyExactCached, resp.Available.Accuracy)
+			require.Zero(t, resp.Available.Count)
+		}
+	})
+
+	t.Run("SnapshotWithinMaxAgeIsReused", func(t *testing.T) {
+		t.Parallel()
+
+		var boundedQueries int
+		endpoint := newStateCountEndpointNoDB(t, func(_ context.Context) (stateCountSnapshot, error) {
+			boundedQueries++
+			return stateCountSnapshot{
+				Counts:     map[rivertype.JobState]int{rivertype.JobStateRunning: 1},
+				ObservedAt: time.Now().Add(-stateCountBoundedMaxAge + 10*time.Second),
+			}, nil
+		}, exactQuery)
+		_, err := endpoint.boundedQueryCacher.RunQuery(ctx)
+		require.NoError(t, err)
+
+		resp, err := endpoint.Execute(ctx, &stateAndCountGetRequest{})
+		require.NoError(t, err)
+		require.Equal(t, 1, boundedQueries)
+		require.Equal(t, stateCountAccuracyExactCached, resp.Running.Accuracy)
+	})
+
+	t.Run("StaleSnapshotRunsQueryInline", func(t *testing.T) {
+		t.Parallel()
+
+		var boundedQueries int
+		endpoint := newStateCountEndpointNoDB(t, func(_ context.Context) (stateCountSnapshot, error) {
+			boundedQueries++
+			observedAt := time.Now()
+			if boundedQueries == 1 {
+				observedAt = observedAt.Add(-stateCountBoundedMaxAge - time.Second)
+			}
+			return stateCountSnapshot{
+				Counts:     map[rivertype.JobState]int{rivertype.JobStateRunning: boundedQueries},
+				ObservedAt: observedAt,
+			}, nil
+		}, exactQuery)
+		_, err := endpoint.boundedQueryCacher.RunQuery(ctx)
+		require.NoError(t, err)
+
+		resp, err := endpoint.Execute(ctx, &stateAndCountGetRequest{})
+		require.NoError(t, err)
+		require.Equal(t, 2, boundedQueries)
+		require.Equal(t, stateCountAccuracyExact, resp.Running.Accuracy)
+		require.Equal(t, 2, resp.Running.Count)
+	})
+}
+
+func TestStateCountExactBehaviorNoDB(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+
+	require.Equal(t, stateAndCountDefaultMax, newStateAndCountGetEndpoint(apibundle.APIBundle[pgx.Tx]{
+		Archetype: riversharedtest.BaseServiceArchetype(t),
+		Driver:    riverpgxv5.New(nil),
+	}).countMax)
+
+	for _, testCase := range []struct {
+		name             string
+		exactAge         time.Duration
+		estimateErr      error
+		expectedAccuracy stateCountAccuracy
+		expectedCount    int
+	}{
+		{name: "FreshExactSnapshot", expectedAccuracy: stateCountAccuracyExactCached, expectedCount: 100},
+		{name: "ExpiredExactSnapshotUsesEstimate", exactAge: stateCountExactMaxAge + time.Second, expectedAccuracy: stateCountAccuracyEstimated, expectedCount: 200},
+		{name: "EstimateFailureUsesLowerBound", exactAge: stateCountExactMaxAge + time.Second, estimateErr: errors.New("statistics unavailable"), expectedAccuracy: stateCountAccuracyLowerBound, expectedCount: 3},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+
+			const countMax = 3
+			var boundedQueries, exactQueries int
+			endpoint := newStateCountEndpointNoDB(t,
+				func(_ context.Context) (stateCountSnapshot, error) {
+					boundedQueries++
+					return stateCountSnapshot{
+						Counts: map[rivertype.JobState]int{
+							rivertype.JobStateAvailable: countMax + 1,
+							rivertype.JobStateRunning:   1,
+						},
+						ObservedAt: time.Now(),
+					}, nil
+				},
+				func(_ context.Context) (stateCountSnapshot, error) {
+					exactQueries++
+					return stateCountSnapshot{
+						Counts:     map[rivertype.JobState]int{rivertype.JobStateAvailable: 100},
+						ObservedAt: time.Now().Add(-testCase.exactAge),
+					}, nil
+				},
+			)
+			endpoint.countMax = countMax
+			endpoint.estimateCounts = func(_ context.Context, states []rivertype.JobState) (map[rivertype.JobState]stateCountEstimate, error) {
+				require.Equal(t, []rivertype.JobState{rivertype.JobStateAvailable}, states)
+				return map[rivertype.JobState]stateCountEstimate{
+					rivertype.JobStateAvailable: {Count: 200},
+				}, testCase.estimateErr
+			}
+			_, err := endpoint.exactQueryCacher.RunQuery(ctx)
+			require.NoError(t, err)
+
+			for range 2 {
+				resp, err := endpoint.Execute(ctx, &stateAndCountGetRequest{})
+				require.NoError(t, err)
+				require.Equal(t, testCase.expectedAccuracy, resp.Available.Accuracy)
+				require.Equal(t, testCase.expectedCount, resp.Available.Count)
+				require.Equal(t, 1, resp.Running.Count)
+			}
+
+			// Requests never run an exact count, and the bounded query only
+			// ran once for the cold start.
+			require.Equal(t, 1, exactQueries)
+			require.Equal(t, 1, boundedQueries)
+		})
+	}
 }
 
 func TestStateAndCountGetEndpointCustomSchema(t *testing.T) {
